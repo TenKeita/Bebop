@@ -46,6 +46,12 @@ Then open the **Actions** tab and enable workflows.
 3. Done: `Forecast on new AI tournament questions` runs every 20 minutes (main tournament + MiniBench), skipping
    questions already forecast.
 
+## Good to know
+- **Until both secrets exist**, the scheduled run skips itself and shows a warning: "Bot not configured yet". It is
+  green, not red, so it does not send failure e-mails every 20 minutes.
+- **Keep-alive.** GitHub switches off scheduled workflows in public repositories after 60 days without commits. The
+  `Keep scheduled workflows alive` workflow makes an empty commit on the 1st of each month to prevent that.
+
 ## Pausing / stopping
 `Actions → Forecast on new AI tournament questions → … → Disable workflow`. Re-enable the same way.
 

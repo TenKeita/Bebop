@@ -62,6 +62,13 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true", help="compute forecasts but do not submit them")
     a = ap.parse_args()
 
+    missing = [k for k in ("METACULUS_TOKEN", "OPENROUTER_API_KEY") if not os.getenv(k, "").strip()]
+    if missing and a.mode == "tournament":
+        # The 20-minute schedule starts as soon as the repository exists, usually before the keys do (the OpenRouter
+        # key arrives with the sponsored credits). Skip cleanly instead of failing (and e-mailing) ~70 times a day; the
+        # ::warning:: line shows up in the GitHub Actions run summary. Manual test runs keep the strict check below.
+        print(f"::warning::Bot not configured yet - missing secret(s): {', '.join(missing)}. Skipping this run.")
+        return
     check_environment(strict=True)
     publish = not a.dry_run
     print_startup_banner(a.mode, will_publish=publish)

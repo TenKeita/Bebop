@@ -198,3 +198,18 @@ def test_forecasting_tools_reuses_one_loop():
     ])
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120).stdout
     assert out.strip().endswith("SAME"), out
+
+
+def test_scheduled_run_skips_cleanly_without_keys():
+    """Before the secrets exist, the scheduled tournament run must exit 0 with a warning (no failure e-mails)."""
+    import os
+    import subprocess
+    env = {k: v for k, v in os.environ.items() if k not in ("METACULUS_TOKEN", "OPENROUTER_API_KEY")}
+    root = pathlib.Path(__file__).resolve().parents[1]
+    out = subprocess.run([sys.executable, str(root / "main.py"), "--mode", "tournament"], capture_output=True, text=True,
+                         timeout=300, env=env, cwd=str(root))
+    assert out.returncode == 0, out.stdout[-1500:] + out.stderr[-1500:]
+    assert "::warning::Bot not configured yet" in out.stdout
+    manual = subprocess.run([sys.executable, str(root / "main.py"), "--mode", "test_questions", "--dry-run"],
+                            capture_output=True, text=True, timeout=300, env=env, cwd=str(root))
+    assert manual.returncode != 0                                # manual test runs still fail loudly
