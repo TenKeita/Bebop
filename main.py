@@ -69,6 +69,11 @@ def main() -> None:
         # ::warning:: line shows up in the GitHub Actions run summary. Manual test runs keep the strict check below.
         print(f"::warning::Bot not configured yet - missing secret(s): {', '.join(missing)}. Skipping this run.")
         return
+    if a.mode == "tournament" and os.getenv("BOT_LIVE", "").strip().lower() != "true":
+        # Deliberate go-live switch (repository variable BOT_LIVE=true), set by the operator after a successful
+        # test run — adding the keys alone must not start live forecasting with an untested setup.
+        print("::warning::Live forecasting is switched off (repository variable BOT_LIVE is not 'true'). Skipping.")
+        return
     check_environment(strict=True)
     publish = not a.dry_run
     print_startup_banner(a.mode, will_publish=publish)

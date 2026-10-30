@@ -43,8 +43,10 @@ Then open the **Actions** tab and enable workflows.
    no errors (costs a few cents of credit).
 2. Run it again with **dry_run = false**. To see the forecasts, open Metaculus → Settings → My Forecasting Bots →
    switch to the bot account, then open the bot-testing-area questions.
-3. Done: `Forecast on new AI tournament questions` runs every 20 minutes (main tournament + MiniBench), skipping
-   questions already forecast.
+3. **Go live:** add the repository variable `BOT_LIVE` = `true` (Settings → Secrets and variables → Actions →
+   Variables). From then on `Forecast on new AI tournament questions` runs every 20 minutes (main tournament +
+   MiniBench), skipping questions already forecast. Set it to `false` (or delete it) to stop forecasting without
+   touching anything else.
 
 ## Good to know
 - **Until both secrets exist**, the scheduled run skips itself and shows a warning: "Bot not configured yet". It is

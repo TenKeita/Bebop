@@ -34,6 +34,8 @@ jobs:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          # Go-live switch: scheduled runs forecast only when the repository variable BOT_LIVE is "true".
+          BOT_LIVE: ${{ vars.BOT_LIVE }}
           # Spending controls (repository variables; defaults in config.py). Tiers: premium / standard / economy / minimal.
           BOT_TIER_MAIN: ${{ vars.BOT_TIER_MAIN }}
           BOT_TIER_MINIBENCH: ${{ vars.BOT_TIER_MINIBENCH }}

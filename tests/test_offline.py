@@ -213,3 +213,16 @@ def test_scheduled_run_skips_cleanly_without_keys():
     manual = subprocess.run([sys.executable, str(root / "main.py"), "--mode", "test_questions", "--dry-run"],
                             capture_output=True, text=True, timeout=300, env=env, cwd=str(root))
     assert manual.returncode != 0                                # manual test runs still fail loudly
+
+
+def test_scheduled_run_needs_bot_live_switch():
+    """With both keys present but BOT_LIVE not 'true', the scheduled run skips (exit 0, warning) without forecasting."""
+    import os
+    import subprocess
+    env = {k: v for k, v in os.environ.items() if k != "BOT_LIVE"}
+    env.update(METACULUS_TOKEN="dummy-token-for-test", OPENROUTER_API_KEY="dummy-key-for-test")
+    root = pathlib.Path(__file__).resolve().parents[1]
+    out = subprocess.run([sys.executable, str(root / "main.py"), "--mode", "tournament"], capture_output=True, text=True,
+                         timeout=300, env=env, cwd=str(root))
+    assert out.returncode == 0, out.stdout[-1500:] + out.stderr[-1500:]
+    assert "Live forecasting is switched off" in out.stdout
