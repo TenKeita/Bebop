@@ -1,0 +1,39 @@
+name: Test Bot (bot-testing-area)
+
+# Manual smoke test: forecasts on the open questions of Metaculus's bot-testing-area tournament (not scored).
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Compute forecasts but do not submit them"
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  test_job:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: "0.13.1"
+      - name: Install dependencies
+        run: uv sync --locked
+      - name: Run bot on the bot-testing-area
+        run: uv run python main.py --mode test_questions ${{ inputs.dry_run && '--dry-run' || '' }}
+        env:
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
+          ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          BOT_TIER_MINIBENCH: ${{ vars.BOT_TIER_MINIBENCH }}

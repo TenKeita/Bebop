@@ -1,0 +1,25 @@
+[project]
+name = "llm-ventures-committee-bot"
+version = "0.1.0"
+description = "Metaculus FutureEval forecasting bot (CommitteeBot) built on Metaculus's official template and forecasting-tools"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "python-decouple>=3.8,<4",
+    "requests>=2.32.3,<3",
+    "asknews>=0.13.11,<0.14",
+    "numpy>=2.3.0,<3",
+    "openai>=2.0.0,<3",
+    "python-dotenv>=1.0.1,<2",
+    "forecasting-tools>=0.2.90,<0.4.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
