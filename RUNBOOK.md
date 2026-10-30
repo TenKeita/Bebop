@@ -33,7 +33,7 @@ done yet.
   - `OPENROUTER_API_KEY` (the sponsored key, or your own);
   - optional `ASKNEWS_CLIENT_ID` and `ASKNEWS_SECRET`.
 - **Variables (optional spending controls):**
-  - `BOT_TIER_MAIN` and `BOT_TIER_MINIBENCH` (`premium` / `standard` / `economy` / `minimal`; default `economy`);
+  - `BOT_TIER_MAIN` and `BOT_TIER_MINIBENCH` (`premium` / `standard` / `balanced` / `minimal`; default `balanced`);
   - `BOT_SOFT_FLOOR_USD` (default 15) and `BOT_HARD_FLOOR_USD` (default 3).
 
 Then open the **Actions** tab and enable workflows.
@@ -68,15 +68,16 @@ Then open the **Actions** tab and enable workflows.
 
 | Tier | Cost |
 |---|---|
-| premium | ~$0.55 |
-| standard | ~$0.40 |
-| economy | ~$0.20 |
-| minimal | ~$0.08 |
+| premium | ~$1.00 |
+| standard | ~$0.55 |
+| balanced (default) | ~$0.35 |
+| minimal | ~$0.12 |
 
 A season has ~500 main-tournament questions plus ~500 MiniBench ones.
-- **~$100 of credit lasts about one season on `economy`.**
-- A richer tier for the main tournament only (`BOT_TIER_MAIN=standard`, MiniBench on `economy`) costs roughly
-  $200–300 per season. That needs your own OpenRouter credit — your decision.
+- **~$100 of credit covers ~280 questions on `balanced`**, about half a season; below the soft floor the bot
+  continues on `minimal`. Metaculus raises credits only after above-average MiniBench results.
+- A full season on `balanced` costs ~$350; on `standard` ~$550. Anything beyond the sponsored credit needs your own
+  OpenRouter credit — your decision.
 - **Prizes:** paid by Metaculus to the bot's owner after each season. Declare them as income where you are taxed, and
   check that competition prizes are compatible with any employment or fellowship contract.
 

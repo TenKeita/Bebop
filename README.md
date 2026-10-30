@@ -8,14 +8,16 @@ a year; bots only, no human in the loop). Built 2026-10-30 on Metaculus's offici
 ## What it does differently from the template
 | | Template | CommitteeBot |
 |---|---|---|
-| Forecast runs | 5 runs of one model | **a committee of 5 runs across model families** (OpenAI, Anthropic, Google), one model per run |
-| Research | one news summary | **two reports:** outside view (reference classes, base rates) + inside view (latest news); never abstains |
+| Forecast runs | 5 runs of one model | **a weighted committee of 5 runs across model families**, anchored on the FutureEval-leaderboard leader (Claude Opus, weight 3) with Gemini Flash, GPT and Grok for diversity; reasoning effort set per model |
+| Research | one news summary | **outside view** (reference classes, base rates, similar past questions) + **inside view** (latest news) + **one agentic follow-up round** (the 1-2 facts that would most change the forecast are searched); never abstains |
 | Binary prompt | status quo emphasis | **base rate first, then the update**, with the exact resolution condition spelled out |
-| Binary aggregation | median | **trimmed mean of log-odds**, clipped to [2%, 98%] (optional extremisation, off by default) |
+| Binary aggregation | median | **weighted median** (best model weighs more), capped to [2%, 98%]; no extremising |
+| Numeric / date | 6 percentiles | **11 percentiles (5th-95th)** so the tails are stated, not extrapolated |
 | Robustness | question fails if <50% of runs return | fails only if <40% return; missing models are replaced from cheaper tiers |
 | Cost control | — | **credit guard:** reads the OpenRouter key's remaining credit; drops to a cheaper tier, or stops, below set floors |
 
-Multiple-choice, numeric, date and conditional questions keep the template's tested prompts and aggregation.
+Multiple-choice and conditional questions keep the template's tested prompts and aggregation. Design choices follow the
+2026 bot analyses and the FutureEval model leaderboard (sources in `config.py`).
 
 ## Files
 | Path | Contents |
@@ -25,7 +27,7 @@ Multiple-choice, numeric, date and conditional questions keep the template's tes
 | `template_bot.py` | the official template class, verbatim (replace it when Metaculus updates it each season) |
 | `config.py` | model tiers, research models, floors (env vars override) |
 | `aggregation.py`, `budget.py` | pure helpers |
-| `tests/` | offline tests: the whole pipeline with every LLM call mocked (13 tests) |
+| `tests/` | offline tests: the whole pipeline with every LLM call mocked (19 tests) |
 | `.github/workflows/` | scheduled forecasting (every 20 min), manual smoke test, offline tests on every push |
 | `RUNBOOK.md` | what the operator does: accounts, keys, GitHub, pausing, budget |
 

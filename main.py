@@ -39,18 +39,20 @@ URLS = {"tournament": "https://www.metaculus.com/tournament/fall-futureeval-2026
 def make_bot(tier: str, publish: bool, available: set[str] | None) -> CommitteeBot:
     committee = build_committee(tier, available)
     parser = GeneralLlm(model=C.PARSER, timeout=C.LLM_TIMEOUT_S, allowed_tries=3)
-    logger.info(f"tier '{tier}': committee {[m.model for m in committee]}")
+    logger.info(f"tier '{tier}': committee {[(m.model, m.weight) for m in committee]}")
     return CommitteeBot(
         committee=committee,
         news_researcher=C.NEWS_RESEARCHER[tier],
         outside_researcher=C.OUTSIDE_VIEW_RESEARCHER[tier],
+        aggregator=C.AGGREGATOR,
         extremize=C.EXTREMIZE,
         clip=(C.CLIP_LOW, C.CLIP_HIGH),
+        research_followup=C.RESEARCH_FOLLOWUP,
         publish_reports_to_metaculus=publish,
         folder_to_save_reports_to=None,
         skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=True,
-        llms={"default": committee[0], "summarizer": parser,
+        llms={"default": committee[0].llm, "summarizer": parser,
               "researcher": GeneralLlm(model=C.NEWS_RESEARCHER[tier]), "parser": parser},
     )
 

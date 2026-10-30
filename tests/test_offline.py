@@ -38,11 +38,22 @@ def offline(monkeypatch):
 
 
 # ---------------------------------------------------------------- aggregation
-def test_aggregate_binary_trimmed_logodds():
+def test_weighted_median_default():
+    ps = [0.3, 0.4, 0.5, 0.6, 0.9]
+    assert aggregate_binary(ps) == pytest.approx(0.5)                         # equal weights -> plain median
+    assert aggregate_binary(ps, [3, 1, 1, 1, 1]) == pytest.approx(0.4)        # anchor (w=3) pulls it down
+    assert aggregate_binary([0.2, 0.8], [1, 1]) == pytest.approx(0.5)         # exact half: average neighbours
+    assert aggregate_binary(ps, [10, 1, 1, 1, 1]) == pytest.approx(0.3)       # dominant weight wins
+    with pytest.raises(ValueError):
+        aggregate_binary(ps, [1, 1])                                         # length mismatch
+
+
+def test_logodds_mean_alternative():
     # trimmed: drop 0.30 and 0.90 -> log-odds mean of 0.4, 0.5, 0.6 = 0 -> 0.5
-    assert aggregate_binary([0.3, 0.4, 0.5, 0.6, 0.9]) == pytest.approx(0.5)
-    # fewer than 5 runs: no trimming
-    assert aggregate_binary([0.2, 0.8]) == pytest.approx(0.5)
+    assert aggregate_binary([0.3, 0.4, 0.5, 0.6, 0.9], method="logodds_mean") == pytest.approx(0.5)
+    assert aggregate_binary([0.2, 0.8], method="logodds_mean") == pytest.approx(0.5)
+    with pytest.raises(ValueError):
+        aggregate_binary([0.5], method="nope")
 
 
 def test_aggregate_binary_clip_and_extremize():
@@ -69,7 +80,7 @@ def test_plain_asyncio_semaphore_binds_to_loop():
             "asyncio.run(two(sem))\n"
             "try:\n    asyncio.run(two(sem)); print('NO ERROR')\n"
             "except RuntimeError as e:\n    print('ERROR', e)\n")
-    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60).stdout
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60).stdout
     assert "different event loop" in out, out
 
 
@@ -86,11 +97,32 @@ def test_binary_committee_end_to_end(offline):
     bot = make_bot()
     report = asyncio.run(bot.forecast_question(bq()))
     assert sorted(bot.models_used) == sorted(MODELS)           # every committee member ran exactly once
-    assert report.prediction == pytest.approx(0.5)              # trimmed log-odds mean (see above)
+    assert report.prediction == pytest.approx(0.4)              # weighted median, anchor weight 3 (see fakes)
     research_prompts = [p for _, p in offline if "OUTSIDE VIEW" in p or "RECENT news" in p]
     assert len(research_prompts) == 2                           # outside + inside view
+    assert sum("Name at most TWO specific facts" in p for _, p in offline) == 1      # one follow-up planning call
+    assert sum(p.startswith("Answer concisely with dated sources") for _, p in offline) == 2   # two follow-up searches
     forecast_prompts = [p for m, p in offline if m in MODELS]
-    assert all("Base rate: 30%" in p and "News: nothing decisive" in p for p in forecast_prompts)
+    assert all("Base rate: 30%" in p and "News: nothing decisive" in p and "Follow-up searches" in p
+               and "Found: a dated fact." in p for p in forecast_prompts)
+
+
+def test_followup_none_adds_nothing(monkeypatch):
+    for k in ("ASKNEWS_CLIENT_ID", "ASKNEWS_SECRET", "ASKNEWS_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    fake, calls = make_fake_invoke(followup="NONE")
+    monkeypatch.setattr(GeneralLlm, "invoke", fake)
+    monkeypatch.setattr(template_bot, "structure_output", fake_structure_output)
+    report = asyncio.run(make_bot().forecast_question(bq(5)))
+    assert report.prediction == pytest.approx(0.4)
+    assert not any(p.startswith("Answer concisely with dated sources") for _, p in calls)
+    assert not any("Follow-up searches" in p for m, p in calls if m in MODELS)
+
+
+def test_followup_can_be_switched_off(offline):
+    report = asyncio.run(make_bot(research_followup=False).forecast_question(bq(6)))
+    assert report.prediction == pytest.approx(0.4)
+    assert not any("Name at most TWO specific facts" in p for _, p in offline)
 
 
 def test_research_failure_never_abstains(monkeypatch):
@@ -101,8 +133,9 @@ def test_research_failure_never_abstains(monkeypatch):
     monkeypatch.setattr(template_bot, "structure_output", fake_structure_output)
     bot = make_bot()
     report = asyncio.run(bot.forecast_question(bq(2)))
-    assert report.prediction == pytest.approx(0.5)
+    assert report.prediction == pytest.approx(0.4)
     assert any(NO_RESEARCH in p for m, p in calls if m in MODELS)
+    assert not any("Name at most TWO specific facts" in p for _, p in calls)   # no follow-up without research
 
 
 def test_get_llm_outside_a_run_is_the_default(offline):
@@ -134,6 +167,8 @@ def test_numeric_end_to_end(offline):
     assert all(b >= a for a, b in zip(cdf, cdf[1:]))           # monotone
     assert cdf[0] == pytest.approx(0.0, abs=1e-9)               # closed lower bound
     assert cdf[-1] < 1.0                                        # open upper bound keeps some mass above
+    numeric_prompts = [p for m, p in offline if m in MODELS]
+    assert numeric_prompts and all("Percentile 5:" in p and "Percentile 95:" in p for p in numeric_prompts)
 
 
 # ---------------------------------------------------------------- budget guard and committee construction
@@ -150,25 +185,25 @@ class _Resp:
 
 def test_credit_guard(monkeypatch):
     g = budget.CreditGuard("key", soft_floor_usd=15, hard_floor_usd=3)
-    for remaining, expected in ((50.0, "economy"), (10.0, "minimal"), (2.0, None)):
+    for remaining, expected in ((50.0, "balanced"), (10.0, "minimal"), (2.0, None)):
         monkeypatch.setattr(budget.requests, "get", lambda *a, r=remaining, **k: _Resp({"data": {"limit_remaining": r}}))
-        tier, why = g.decide("economy", "minimal")
+        tier, why = g.decide("balanced", "minimal")
         assert tier == expected, why
     monkeypatch.setattr(budget.requests, "get", lambda *a, **k: (_ for _ in ()).throw(OSError("offline")))
-    assert g.decide("economy", "minimal")[0] == "economy"      # unknown -> keep the requested tier
+    assert g.decide("balanced", "minimal")[0] == "balanced"    # unknown -> keep the requested tier
     assert budget.CreditGuard(None, 15, 3).remaining_usd() is None
 
 
 def test_build_committee_drops_missing_models():
     tier = "standard"
-    names = committee_bot.C.TIERS[tier]
+    names = [m["model"] for m in committee_bot.C.TIERS[tier]]
+    every = {m["model"].removeprefix("openrouter/") for t in committee_bot.C.TIERS.values() for m in t}
     available = {n.removeprefix("openrouter/") for n in names[1:]}
     c = build_committee(tier, available)
     assert len(c) == len(names)                                  # topped up to the full committee size
     assert [m.model for m in c][:len(names) - 1] == names[1:]    # own models first, in order
-    assert all(m.model.removeprefix("openrouter/") in available | {n.removeprefix("openrouter/")
-               for t in committee_bot.C.TIERS.values() for n in t} for m in c)
-    only_minimal = {n.removeprefix("openrouter/") for n in committee_bot.C.TIERS["minimal"]}
+    assert all(m.model.removeprefix("openrouter/") in every for m in c)
+    only_minimal = {m["model"].removeprefix("openrouter/") for m in committee_bot.C.TIERS["minimal"]}
     fallback = build_committee(tier, only_minimal)
     assert len(fallback) == len(names)
     assert all(m.model.removeprefix("openrouter/") in only_minimal for m in fallback)
@@ -176,11 +211,20 @@ def test_build_committee_drops_missing_models():
         build_committee(tier, set())
 
 
+def test_tiers_are_anchored_and_weighted():
+    for name, members in committee_bot.C.TIERS.items():
+        assert 3 <= len(members) <= 7, name                       # 3-7 diverse models (2026 analyses)
+        if name != "minimal":
+            assert "claude-opus" in members[0]["model"] and members[0]["weight"] >= 2, name   # leaderboard anchor
+    c = build_committee("balanced", None)
+    assert c[0].weight == 3 and c[0].llm.model.endswith("claude-opus-5.5")
+
+
 def test_two_event_loops_plain_python():
     """The real check for the semaphore fix: plain Python, two asyncio.run calls with 2 questions each."""
     import subprocess
     script = pathlib.Path(__file__).with_name("two_loops_check.py")
-    out = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=300)
+    out = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
     assert out.stdout.strip().endswith("OK"), out.stdout[-2000:] + out.stderr[-2000:]
 
 
@@ -196,7 +240,7 @@ def test_forecasting_tools_reuses_one_loop():
         "asyncio.run(f()); asyncio.run(f())",
         "print('SAME' if loops[0] is loops[1] else 'DIFFERENT')",
     ])
-    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120).stdout
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120).stdout
     assert out.strip().endswith("SAME"), out
 
 
@@ -205,13 +249,14 @@ def test_scheduled_run_skips_cleanly_without_keys():
     import os
     import subprocess
     env = {k: v for k, v in os.environ.items() if k not in ("METACULUS_TOKEN", "OPENROUTER_API_KEY")}
+    env["PYTHONIOENCODING"] = "utf-8"
     root = pathlib.Path(__file__).resolve().parents[1]
-    out = subprocess.run([sys.executable, str(root / "main.py"), "--mode", "tournament"], capture_output=True, text=True,
+    out = subprocess.run([sys.executable, str(root / "main.py"), "--mode", "tournament"], capture_output=True, text=True, encoding="utf-8", errors="replace",
                          timeout=300, env=env, cwd=str(root))
     assert out.returncode == 0, out.stdout[-1500:] + out.stderr[-1500:]
     assert "::warning::Bot not configured yet" in out.stdout
     manual = subprocess.run([sys.executable, str(root / "main.py"), "--mode", "test_questions", "--dry-run"],
-                            capture_output=True, text=True, timeout=300, env=env, cwd=str(root))
+                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300, env=env, cwd=str(root))
     assert manual.returncode != 0                                # manual test runs still fail loudly
 
 
@@ -220,9 +265,9 @@ def test_scheduled_run_needs_bot_live_switch():
     import os
     import subprocess
     env = {k: v for k, v in os.environ.items() if k != "BOT_LIVE"}
-    env.update(METACULUS_TOKEN="dummy-token-for-test", OPENROUTER_API_KEY="dummy-key-for-test")
+    env.update(METACULUS_TOKEN="dummy-token-for-test", OPENROUTER_API_KEY="dummy-key-for-test", PYTHONIOENCODING="utf-8")
     root = pathlib.Path(__file__).resolve().parents[1]
-    out = subprocess.run([sys.executable, str(root / "main.py"), "--mode", "tournament"], capture_output=True, text=True,
+    out = subprocess.run([sys.executable, str(root / "main.py"), "--mode", "tournament"], capture_output=True, text=True, encoding="utf-8", errors="replace",
                          timeout=300, env=env, cwd=str(root))
     assert out.returncode == 0, out.stdout[-1500:] + out.stderr[-1500:]
     assert "Live forecasting is switched off" in out.stdout
