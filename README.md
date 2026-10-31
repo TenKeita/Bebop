@@ -27,7 +27,7 @@ Multiple-choice and conditional questions keep the template's tested prompts and
 | `template_bot.py` | the official template class, verbatim (replace it when Metaculus updates it each season) |
 | `config.py` | model tiers, research models, floors (env vars override) |
 | `aggregation.py`, `budget.py` | pure helpers |
-| `tests/` | offline tests: the whole pipeline with every LLM call mocked (19 tests) |
+| `tests/` | offline tests: the whole pipeline with every LLM call mocked (23 tests) |
 | `.github/workflows/` | scheduled forecasting (every 20 min), manual smoke test, offline tests on every push |
 | `RUNBOOK.md` | what the operator does: accounts, keys, GitHub, pausing, budget |
 

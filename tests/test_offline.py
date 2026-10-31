@@ -271,3 +271,32 @@ def test_scheduled_run_needs_bot_live_switch():
                          timeout=300, env=env, cwd=str(root))
     assert out.returncode == 0, out.stdout[-1500:] + out.stderr[-1500:]
     assert "Live forecasting is switched off" in out.stdout
+
+
+# ---------------------------------------------------------------- AskNews (optional inside-view source)
+ASKNEWS_ARTICLES = "Here are the relevant news articles:\n\n**X advances**\nSummary.\nPublish date: October 30, 2026\n\n"
+ASKNEWS_EMPTY = "Here are the relevant news articles:\n\nNo articles were found.\n\n"
+
+
+@pytest.mark.parametrize("asknews, uses_fallback", [(ASKNEWS_ARTICLES, False), (ASKNEWS_EMPTY, True),
+                                                     (RuntimeError("credits used up"), True)])
+def test_asknews_used_or_falls_back(offline, monkeypatch, asknews, uses_fallback):
+    monkeypatch.setenv("ASKNEWS_API_KEY", "dummy-asknews-key")             # the current single-key format
+
+    async def fake_asknews(self, preset, prompt):
+        if isinstance(asknews, Exception):
+            raise asknews
+        return asknews
+    monkeypatch.setattr(committee_bot.AskNewsSearcher, "call_preconfigured_version", fake_asknews)
+    report = asyncio.run(make_bot().forecast_question(bq(7)))
+    assert report.prediction == pytest.approx(0.4)
+    assert any("RECENT news" in p for _, p in offline) == uses_fallback    # Perplexity news only as the fallback
+    forecast_prompts = [p for m, p in offline if m in MODELS]
+    assert forecast_prompts and all(("X advances" in p) != uses_fallback for p in forecast_prompts)
+
+
+def test_asknews_empty_marker_still_in_library():
+    """The fallback above keys on the library's 'no articles' text; fail loudly if an update changes it."""
+    import inspect
+    from forecasting_tools import AskNewsSearcher
+    assert "No articles were found" in inspect.getsource(AskNewsSearcher.get_formatted_news_async)

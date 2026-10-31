@@ -31,7 +31,9 @@ done yet.
 - **Secrets:**
   - `METACULUS_TOKEN` (bot token);
   - `OPENROUTER_API_KEY` (the sponsored key, or your own);
-  - optional `ASKNEWS_CLIENT_ID` and `ASKNEWS_SECRET`.
+  - optional AskNews access (Metaculus participant access; next application window 2027-01-01): `ASKNEWS_API_KEY`,
+    or the older `ASKNEWS_CLIENT_ID` + `ASKNEWS_SECRET` pair. AskNews's free plan (25 credits/month ≈ 4 questions)
+    is too small to be worth adding.
 - **Variables (optional spending controls):**
   - `BOT_TIER_MAIN` and `BOT_TIER_MINIBENCH` (`premium` / `standard` / `balanced` / `minimal`; default `balanced`);
   - `BOT_SOFT_FLOOR_USD` (default 15) and `BOT_HARD_FLOOR_USD` (default 3).

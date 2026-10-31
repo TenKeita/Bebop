@@ -205,9 +205,12 @@ class CommitteeBot(FallTemplateBot2026):
     async def _news_research(self, question: MetaculusQuestion) -> str:
         if (os.getenv("ASKNEWS_CLIENT_ID") and os.getenv("ASKNEWS_SECRET")) or os.getenv("ASKNEWS_API_KEY"):
             try:
-                return await AskNewsSearcher().call_preconfigured_version("asknews/news-summaries",
+                news = await AskNewsSearcher().call_preconfigured_version("asknews/news-summaries",
                                                                           question.question_text)
-            except Exception as e:                               # noqa: BLE001
+                if "No articles were found" not in news:
+                    return news
+                logger.warning(f"AskNews found no articles, falling back to {self.news_researcher}")
+            except Exception as e:                               # noqa: BLE001 — e.g. credits used up, rate limit
                 logger.warning(f"AskNews failed, falling back to {self.news_researcher}: {e!r}")
         prompt = clean_indents(
             f"""
