@@ -1,19 +1,27 @@
 """Shared fakes for the offline tests and the plain-Python two-event-loop check (no network, no tokens)."""
 from __future__ import annotations
 
+import datetime as dt
 import re
 
+import numpy as np
 from forecasting_tools import BinaryQuestion, GeneralLlm
 from forecasting_tools.data_models.binary_report import BinaryPrediction
 from forecasting_tools.data_models.multiple_choice_report import PredictedOption, PredictedOptionList
-from forecasting_tools.data_models.numeric_report import Percentile
+from forecasting_tools.data_models.numeric_report import DatePercentile, Percentile
 
+import market_prior as MP
+from aggregation import combine_binary
 from committee_bot import CommitteeBot, Member
 
 MODEL_P = {"openrouter/fam1/m1": 0.30, "openrouter/fam2/m2": 0.40, "openrouter/fam3/m3": 0.50,
            "openrouter/fam4/m4": 0.60, "openrouter/fam5/m5": 0.90}
 MODELS = list(MODEL_P)
-WEIGHTS = {MODELS[0]: 3.0}                      # the anchor model weighs 3, the others 1 (like config.py tiers)
+WEIGHTS = {MODELS[0]: 2.0}                      # the anchor model weighs 2, the others 1 (like config.py tiers)
+EXPECTED_BINARY = combine_binary(list(MODEL_P.values()), [WEIGHTS.get(m, 1.0) for m in MODELS])   # no shift, no prior
+PCTS = (5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95)
+SETTINGS = {"numeric_value": lambda p, i: p + 5 * i,          # value a model states for percentile p (i = model index)
+            "market_json": None}                               # reply of the market-question parser (None = "not a market question")
 
 
 def make_fake_invoke(research_fails: bool = False, followup: str = "query one\nquery two"):
@@ -21,6 +29,8 @@ def make_fake_invoke(research_fails: bool = False, followup: str = "query one\nq
 
     async def fake_invoke(self, prompt, *args, **kwargs):
         calls.append((self.model, prompt))
+        if "You convert a forecasting question into a data request" in prompt:
+            return SETTINGS["market_json"] or '{"market_question": false}'
         if "OUTSIDE VIEW" in prompt:
             if research_fails:
                 raise RuntimeError("search down")
@@ -37,9 +47,11 @@ def make_fake_invoke(research_fails: bool = False, followup: str = "query one\nq
         if "The options are" in prompt:
             a = 40 + 5 * i
             return f"Alpha: {a}%\nBeta: {90 - a}%\nGamma: 10%"
+        if "This is a date question" in prompt:
+            base = dt.date(2027, 1, 1)
+            return "\n".join(f"Percentile {p}: {(base + dt.timedelta(days=3 * p + 10 * i)).isoformat()}" for p in PCTS)
         if "Percentile 10:" in prompt:
-            s = 5 * i
-            return "\n".join(f"Percentile {p}: {p + s}" for p in (5, 10, 20, 30, 40, 50, 60, 70, 80, 90, 95))
+            return "\n".join(f"Percentile {p}: {SETTINGS['numeric_value'](p, i)}" for p in PCTS)
         return f"(a)...(e)\nProbability: {round(MODEL_P.get(self.model, 0.5) * 100)}%"
     return fake_invoke, calls
 
@@ -53,7 +65,10 @@ async def fake_structure_output(text_to_structure, output_type, model=None, **kw
                                                       for n, p in re.findall(r"^(\w+):\s*([\d.]+)%", t, re.M)])
     if output_type == list[Percentile]:
         return [Percentile(percentile=int(a) / 100, value=float(b))
-                for a, b in re.findall(r"Percentile (\d+):\s*([\d.]+)", t)]
+                for a, b in re.findall(r"Percentile (\d+):\s*(-?[\d.]+)", t)]
+    if output_type == list[DatePercentile]:
+        return [DatePercentile(percentile=int(a) / 100, value=dt.datetime.fromisoformat(b).replace(tzinfo=dt.timezone.utc))
+                for a, b in re.findall(r"Percentile (\d+):\s*(\d{4}-\d{2}-\d{2})", t)]
     raise AssertionError(f"unexpected output type {output_type}")
 
 
@@ -62,11 +77,26 @@ def make_bot(**kwargs) -> CommitteeBot:
     committee = [Member(GeneralLlm(model=m), WEIGHTS.get(m, 1.0)) for m in MODELS]
     return CommitteeBot(committee=committee, news_researcher="openrouter/x/news", outside_researcher="openrouter/x/outside",
                         followup_planner="openrouter/x/planner", followup_searcher="openrouter/x/search",
+                        market_parser="openrouter/x/marketparser",
                         publish_reports_to_metaculus=False, skip_previously_forecasted_questions=False,
                         llms={"default": committee[0].llm, "summarizer": parser,
                               "researcher": GeneralLlm(model="openrouter/x/news"), "parser": parser}, **kwargs)
 
 
-def bq(i=1) -> BinaryQuestion:
-    return BinaryQuestion(question_text="Will X happen before 2026-12-31?", resolution_criteria="Resolves Yes if X.",
-                          fine_print="", background_info="", page_url=f"https://example.org/q/{i}", id_of_question=i)
+def bq(i=1, text="Will X happen before 2026-12-31?", **kw) -> BinaryQuestion:
+    return BinaryQuestion(question_text=text, resolution_criteria="Resolves Yes if X.",
+                          fine_print="", background_info="", page_url=f"https://example.org/q/{i}", id_of_question=i, **kw)
+
+
+def synthetic_series(name: str, days: int = 800, start: float = 100.0, vol: float = 0.01, seed: int = 1,
+                     end: dt.date | None = None) -> MP.Series:
+    """A random-walk daily series ending on the last business day on or before `end` (default: today, UTC)."""
+    end = end or dt.datetime.now(dt.timezone.utc).date()
+    dates, d = [], end
+    while len(dates) < days:
+        if d.weekday() < 5:
+            dates.append(d)
+        d -= dt.timedelta(days=1)
+    dates = dates[::-1]
+    close = start * np.exp(np.cumsum(np.random.default_rng(seed).normal(0, vol, days)))
+    return MP.Series(name, dates, close, close * 1.005, close * 0.995)

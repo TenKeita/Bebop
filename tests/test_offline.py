@@ -24,7 +24,7 @@ import template_bot  # noqa: E402
 from aggregation import aggregate_binary, logit  # noqa: E402
 from committee_bot import NO_RESEARCH, CommitteeBot, build_committee  # noqa: E402
 
-from fakes import MODEL_P, MODELS, bq, fake_structure_output, make_bot, make_fake_invoke  # noqa: E402
+from fakes import EXPECTED_BINARY, MODEL_P, MODELS, bq, fake_structure_output, make_bot, make_fake_invoke  # noqa: E402
 
 
 @pytest.fixture
@@ -38,29 +38,31 @@ def offline(monkeypatch):
 
 
 # ---------------------------------------------------------------- aggregation
-def test_weighted_median_default():
+def test_logodds_mean_is_the_default():
     ps = [0.3, 0.4, 0.5, 0.6, 0.9]
-    assert aggregate_binary(ps) == pytest.approx(0.5)                         # equal weights -> plain median
-    assert aggregate_binary(ps, [3, 1, 1, 1, 1]) == pytest.approx(0.4)        # anchor (w=3) pulls it down
-    assert aggregate_binary([0.2, 0.8], [1, 1]) == pytest.approx(0.5)         # exact half: average neighbours
-    assert aggregate_binary(ps, [10, 1, 1, 1, 1]) == pytest.approx(0.3)       # dominant weight wins
+    mean_logit = sum(logit(x) for x in ps) / 5
+    assert aggregate_binary(ps) == pytest.approx(1 / (1 + pow(2.718281828459045, -mean_logit)))
+    assert aggregate_binary([0.2, 0.8]) == pytest.approx(0.5)
+    assert aggregate_binary(ps, [2, 1, 1, 1, 1]) < aggregate_binary(ps)        # the anchor (0.30) pulls it down
     with pytest.raises(ValueError):
         aggregate_binary(ps, [1, 1])                                         # length mismatch
-
-
-def test_logodds_mean_alternative():
-    # trimmed: drop 0.30 and 0.90 -> log-odds mean of 0.4, 0.5, 0.6 = 0 -> 0.5
-    assert aggregate_binary([0.3, 0.4, 0.5, 0.6, 0.9], method="logodds_mean") == pytest.approx(0.5)
-    assert aggregate_binary([0.2, 0.8], method="logodds_mean") == pytest.approx(0.5)
     with pytest.raises(ValueError):
         aggregate_binary([0.5], method="nope")
 
 
-def test_aggregate_binary_clip_and_extremize():
+def test_weighted_median_alternative():
+    ps = [0.3, 0.4, 0.5, 0.6, 0.9]
+    assert aggregate_binary(ps, method="weighted_median") == pytest.approx(0.5)
+    assert aggregate_binary(ps, [3, 1, 1, 1, 1], method="weighted_median") == pytest.approx(0.4)
+    assert aggregate_binary(ps, [10, 1, 1, 1, 1], method="weighted_median") == pytest.approx(0.3)
+
+
+def test_shift_slope_and_clip():
     assert aggregate_binary([0.999] * 5) == pytest.approx(0.98)
     assert aggregate_binary([0.001] * 5) == pytest.approx(0.02)
-    p = aggregate_binary([0.6] * 3, extremize=2.0)
-    assert p == pytest.approx(1 / (1 + pow(2.718281828459045, -2 * logit(0.6))), rel=1e-6)
+    assert aggregate_binary([0.5] * 3, shift=-0.3) == pytest.approx(1 / (1 + pow(2.718281828459045, 0.3)))   # 42.6%
+    assert aggregate_binary([0.6] * 3, slope=2.0) == pytest.approx(1 / (1 + pow(2.718281828459045, -2 * logit(0.6))), rel=1e-6)
+    assert aggregate_binary([0.4] * 3, shift=-0.3) < 0.4 < aggregate_binary([0.4] * 3, shift=+0.3)
     with pytest.raises(ValueError):
         aggregate_binary([])
 
@@ -97,7 +99,7 @@ def test_binary_committee_end_to_end(offline):
     bot = make_bot()
     report = asyncio.run(bot.forecast_question(bq()))
     assert sorted(bot.models_used) == sorted(MODELS)           # every committee member ran exactly once
-    assert report.prediction == pytest.approx(0.4)              # weighted median, anchor weight 3 (see fakes)
+    assert report.prediction == pytest.approx(EXPECTED_BINARY)  # weighted mean of log-odds, anchor weight 2
     research_prompts = [p for _, p in offline if "OUTSIDE VIEW" in p or "RECENT news" in p]
     assert len(research_prompts) == 2                           # outside + inside view
     assert sum("Name at most TWO specific facts" in p for _, p in offline) == 1      # one follow-up planning call
@@ -114,14 +116,14 @@ def test_followup_none_adds_nothing(monkeypatch):
     monkeypatch.setattr(GeneralLlm, "invoke", fake)
     monkeypatch.setattr(template_bot, "structure_output", fake_structure_output)
     report = asyncio.run(make_bot().forecast_question(bq(5)))
-    assert report.prediction == pytest.approx(0.4)
+    assert report.prediction == pytest.approx(EXPECTED_BINARY)
     assert not any(p.startswith("Answer concisely with dated sources") for _, p in calls)
     assert not any("Follow-up searches" in p for m, p in calls if m in MODELS)
 
 
 def test_followup_can_be_switched_off(offline):
     report = asyncio.run(make_bot(research_followup=False).forecast_question(bq(6)))
-    assert report.prediction == pytest.approx(0.4)
+    assert report.prediction == pytest.approx(EXPECTED_BINARY)
     assert not any("Name at most TWO specific facts" in p for _, p in offline)
 
 
@@ -133,7 +135,7 @@ def test_research_failure_never_abstains(monkeypatch):
     monkeypatch.setattr(template_bot, "structure_output", fake_structure_output)
     bot = make_bot()
     report = asyncio.run(bot.forecast_question(bq(2)))
-    assert report.prediction == pytest.approx(0.4)
+    assert report.prediction == pytest.approx(EXPECTED_BINARY)
     assert any(NO_RESEARCH in p for m, p in calls if m in MODELS)
     assert not any("Name at most TWO specific facts" in p for _, p in calls)   # no follow-up without research
 
@@ -217,7 +219,8 @@ def test_tiers_are_anchored_and_weighted():
         if name != "minimal":
             assert "claude-opus" in members[0]["model"] and members[0]["weight"] >= 2, name   # leaderboard anchor
     c = build_committee("balanced", None)
-    assert c[0].weight == 3 and c[0].llm.model.endswith("claude-opus-5.5")
+    assert c[0].weight == 2 and c[0].llm.model.endswith("claude-opus-5.5")
+    assert len({m.llm.model for m in c}) == len(c)                # balanced: five DIFFERENT models
 
 
 def test_two_event_loops_plain_python():
@@ -289,7 +292,7 @@ def test_asknews_used_or_falls_back(offline, monkeypatch, asknews, uses_fallback
         return asknews
     monkeypatch.setattr(committee_bot.AskNewsSearcher, "call_preconfigured_version", fake_asknews)
     report = asyncio.run(make_bot().forecast_question(bq(7)))
-    assert report.prediction == pytest.approx(0.4)
+    assert report.prediction == pytest.approx(EXPECTED_BINARY)
     assert any("RECENT news" in p for _, p in offline) == uses_fallback    # Perplexity news only as the fallback
     forecast_prompts = [p for m, p in offline if m in MODELS]
     assert forecast_prompts and all(("X advances" in p) != uses_fallback for p in forecast_prompts)

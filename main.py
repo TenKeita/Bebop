@@ -27,6 +27,7 @@ silence_noisy_dependencies()
 from forecasting_tools import GeneralLlm, MetaculusClient  # noqa: E402
 
 import config as C  # noqa: E402
+import forecast_log  # noqa: E402
 from budget import CreditGuard  # noqa: E402
 from committee_bot import CommitteeBot, available_openrouter_models, build_committee  # noqa: E402
 
@@ -45,8 +46,15 @@ def make_bot(tier: str, publish: bool, available: set[str] | None) -> CommitteeB
         news_researcher=C.NEWS_RESEARCHER[tier],
         outside_researcher=C.OUTSIDE_VIEW_RESEARCHER[tier],
         aggregator=C.AGGREGATOR,
-        extremize=C.EXTREMIZE,
+        binary_shift=C.BINARY_SHIFT,
+        binary_slope=C.BINARY_SLOPE,
         clip=(C.CLIP_LOW, C.CLIP_HIGH),
+        numeric_flat_weight=C.NUMERIC_FLAT_WEIGHT,
+        numeric_tail=C.NUMERIC_TAIL,
+        market_prior=C.MARKET_PRIOR,
+        market_weight_rule=C.MARKET_PRIOR_WEIGHT_RULE,
+        market_weight_llm=C.MARKET_PRIOR_WEIGHT_LLM,
+        market_llm=C.MARKET_PRIOR_LLM,
         research_followup=C.RESEARCH_FOLLOWUP,
         publish_reports_to_metaculus=publish,
         folder_to_save_reports_to=None,
@@ -95,6 +103,13 @@ def main() -> None:
         if a.mode != "tournament":
             bot.skip_previously_forecasted_questions = False
         reports += asyncio.run(bot.forecast_on_tournament(tournament_id, return_exceptions=True))
+        forecast_log.write(bot.run_log, C.FORECAST_LOG_DIR, a.mode, tier_used, publish)
+        n, mean = bot.binary_summary()
+        if n:
+            # Calibration check that needs no resolutions: about 32% of tournament questions resolve Yes, so the mean
+            # yes/no forecast over many questions should sit near that (a higher mean = shift BOT_BINARY_SHIFT lower).
+            logger.info(f"{tournament_id}: {n} yes/no forecast(s), mean {mean:.1%} "
+                        f"(tournament base rate ~{C.TARGET_YES_RATE:.0%}; shift {C.BINARY_SHIFT:+.2f})")
     if reports:
         CommitteeBot.log_report_summary(reports)
     print_run_summary_banner(reports, will_publish=publish, tournament_url=URLS.get(a.mode))

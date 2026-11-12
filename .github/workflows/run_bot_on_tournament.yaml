@@ -40,5 +40,17 @@ jobs:
           # Spending controls (repository variables; defaults in config.py). Tiers: premium / standard / balanced / minimal.
           BOT_TIER_MAIN: ${{ vars.BOT_TIER_MAIN }}
           BOT_TIER_MINIBENCH: ${{ vars.BOT_TIER_MINIBENCH }}
+          # Calibration and market-prior switches (repository variables; defaults in config.py).
+          BOT_BINARY_SHIFT: ${{ vars.BOT_BINARY_SHIFT }}
+          BOT_NUMERIC_FLAT_WEIGHT: ${{ vars.BOT_NUMERIC_FLAT_WEIGHT }}
+          BOT_MARKET_PRIOR: ${{ vars.BOT_MARKET_PRIOR }}
           BOT_SOFT_FLOOR_USD: ${{ vars.BOT_SOFT_FLOOR_USD }}
           BOT_HARD_FLOOR_USD: ${{ vars.BOT_HARD_FLOOR_USD }}
+      - name: Keep the structured forecast log (one line per question, per-model forecasts)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: forecast-log-${{ github.run_id }}
+          path: forecast_log/
+          if-no-files-found: ignore
+          retention-days: 90

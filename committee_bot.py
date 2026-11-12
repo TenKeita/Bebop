@@ -1,22 +1,22 @@
-"""CommitteeBot — a Metaculus FutureEval forecasting bot (built 2026-10-30, revised the same day against the 2026 bot
-analyses; see config.py for the evidence).
+"""CommitteeBot — a Metaculus FutureEval forecasting bot (built 2026-10-30; revised 2026-11-12 on Metaculus's own
+tournament data — see aggregation.py and config.py for the evidence behind each choice).
 
 Subclass of Metaculus's official template (template_bot.FallTemplateBot2026, kept verbatim). It inherits every tested
-question handler (binary, multiple choice, numeric, date, conditional; parsing; CDF construction; comments;
-submission) and changes only what the published analyses say matters:
+question handler (binary, multiple choice, numeric, discrete, date, conditional; parsing; CDF construction; comments;
+submission) and changes only what measurably matters:
 
-  1. A WEIGHTED COMMITTEE across model families, anchored on the strongest model on the FutureEval leaderboard
-     (Claude Opus) — frontier models dominate; 3-7 diverse models help. Each prediction run gets its own model via a
-     per-task context variable (no race between the parallel runs of one question).
-  2. RESEARCH = outside view (reference classes, base rates) + inside view (latest news) + one AGENTIC FOLLOW-UP
-     round (a cheap model names the 1-2 facts that would most change the forecast; they are searched). Never abstain:
-     if everything fails, forecast from the question text alone (a skipped question scores 0).
-  3. Binary: base rate first, then the update; aggregation = WEIGHTED MEDIAN (median preferred by winners; the best
-     model weighs more), capped to [2%, 98%].
-  4. Numeric / date: 11 percentiles (5th..95th) instead of the template's 6, so the tails are stated rather than
-     extrapolated (several winners flagged the template's numeric handling as weak).
-  5. More forgiving: a question succeeds if >= 40% of the runs return (template: 50%).
-Multiple-choice questions keep the template's prompt and median aggregation.
+  1. A COMMITTEE of five different strong models (Claude Opus with a mild extra weight, GPT, Gemini Pro, Gemini Flash,
+     a fifth for diversity). Each prediction run gets its own model via a per-task context variable.
+  2. RESEARCH = outside view (base rates) + inside view (latest news) + one agentic follow-up round, plus a
+     QUANTITATIVE BASELINE from market data for price questions (market_prior.py). Never abstains.
+  3. Yes/no: base rate first in the prompt; mean of log-odds across the committee; a calibration SHIFT down (every
+     bot in past tournaments over-predicted Yes); blend with the market baseline when there is one; capped [2%, 98%].
+  4. Numbers / dates: 11 percentiles per run; the runs' CDFs are AVERAGED (a mixture, not the template's pointwise
+     median), blended with the market baseline when there is one, then mixed with 15% of a flat distribution (past
+     bots' ranges held the truth only 58% of the time when they claimed 80%).
+  5. A structured log of every forecast, with each model's own answer (forecast_log.py), to fit weights later.
+  6. More forgiving: a question succeeds if >= 40% of the runs return (template: 50%).
+Multiple-choice questions keep the template's prompt and aggregation (smoothing did not help on past data).
 """
 from __future__ import annotations
 
@@ -27,13 +27,18 @@ import logging
 import os
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
+import numpy as np
 from forecasting_tools import (AskNewsSearcher, BinaryQuestion, DateQuestion, GeneralLlm, MetaculusQuestion,
-                               NumericDistribution, NumericQuestion, ReasonedPrediction, clean_indents)
+                               MultipleChoiceQuestion, NumericDistribution, NumericQuestion, ReasonedPrediction,
+                               clean_indents)
+from forecasting_tools.data_models.numeric_report import Percentile
 
 import config as C
-from aggregation import aggregate_binary
+import market_prior as MP
+import market_question as MQ
+from aggregation import aggregate_cdf, blend_logodds, calibrate_binary, combine_binary
 from template_bot import FallTemplateBot2026
 
 logger = logging.getLogger(__name__)
@@ -94,8 +99,10 @@ def build_committee(tier: str, available: set[str] | None) -> list[Member]:
 
 class CommitteeBot(FallTemplateBot2026):
     def __init__(self, *, committee: list[Member], news_researcher: str, outside_researcher: str,
-                 aggregator: str = "weighted_median", extremize: float = 1.0,
-                 clip: tuple[float, float] = (0.02, 0.98), research_followup: bool = True,
+                 aggregator: str = "logodds_mean", binary_shift: float = 0.0, binary_slope: float = 1.0,
+                 clip: tuple[float, float] = (0.02, 0.98), numeric_flat_weight: float = 0.15, numeric_tail: float = 0.05,
+                 market_prior: bool = True, market_weight_rule: float = 0.8, market_weight_llm: float = 0.5,
+                 market_llm: bool = True, market_parser: str | None = None, research_followup: bool = True,
                  followup_planner: str | None = None, followup_searcher: str | None = None, **kwargs):
         if not committee:
             raise ValueError("empty committee")
@@ -107,13 +114,20 @@ class CommitteeBot(FallTemplateBot2026):
         self.committee = committee
         self.news_researcher = news_researcher
         self.outside_researcher = outside_researcher
-        self.aggregator, self.extremize, self.clip = aggregator, extremize, clip
+        self.aggregator, self.clip = aggregator, clip
+        self.binary_shift, self.binary_slope = binary_shift, binary_slope
+        self.numeric_flat_weight, self.numeric_tail = numeric_flat_weight, numeric_tail
+        self.market_prior, self.market_llm = market_prior, market_llm
+        self.market_weight_rule, self.market_weight_llm = market_weight_rule, market_weight_llm
+        self.market_parser = market_parser or C.PARSER
+        self._market: dict[object, MQ.MarketPrior] = {}        # question -> market-data prior (price questions only)
+        self.run_log: list[dict] = []                           # one record per aggregated question (forecast_log.py)
         self.research_followup = research_followup
         self.followup_planner = followup_planner or C.FOLLOWUP_PLANNER
         self.followup_searcher = followup_searcher or C.FOLLOWUP_SEARCHER
         self.models_used: list[str] = []                       # which model ran each prediction (logs, tests)
         self._run_idx: dict[object, int] = {}
-        self._run_results: dict[object, list[tuple[float, object]]] = {}
+        self._run_results: dict[object, list[tuple[float, object, str]]] = {}
         self._lock: asyncio.Lock | None = None
         self._lock_loop: asyncio.AbstractEventLoop | None = None
 
@@ -159,22 +173,25 @@ class CommitteeBot(FallTemplateBot2026):
             result = await super()._make_prediction(question, research)
         finally:
             _RUN_MEMBER.reset(token)
-        self._run_results.setdefault(key, []).append((member.weight, result.prediction_value))
+        self._run_results.setdefault(key, []).append((member.weight, result.prediction_value, member.model))
         return result
 
     # ------------------------------------------------------------------ research: outside + inside view + follow-up
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._loop_semaphore():
-            news, outside = await asyncio.gather(self._news_research(question), self._outside_view_research(question),
-                                                 return_exceptions=True)
+            news, outside, prior = await asyncio.gather(self._news_research(question), self._outside_view_research(question),
+                                                        self._market_prior(question), return_exceptions=True)
             parts = []
+            if isinstance(prior, MQ.MarketPrior):
+                unit = f" {question.unit_of_measure}" if getattr(question, "unit_of_measure", None) else ""
+                parts.append(f"## Quantitative baseline (market data)\n{prior.text(unit)}")
             for title, text in (("Outside view (reference classes and base rates)", outside),
                                 ("Inside view (latest news and current status)", news)):
                 if isinstance(text, str) and text.strip():
                     parts.append(f"## {title}\n{text.strip()}")
                 else:
                     logger.warning(f"{title} research failed for {question.page_url}: {text!r}")
-            if self.research_followup and parts:
+            if self.research_followup and any(not x.startswith("## Quantitative baseline") for x in parts):
                 try:
                     follow = await self._followup_research(question, "\n\n".join(parts))
                     if follow:
@@ -184,6 +201,50 @@ class CommitteeBot(FallTemplateBot2026):
             research = "\n\n".join(parts) if parts else NO_RESEARCH
             logger.info(f"Research for URL {question.page_url}:\n{research}")
             return research
+
+    async def _market_prior(self, question: MetaculusQuestion) -> MQ.MarketPrior | None:
+        """A market-data prior for price questions (see market_prior.py); None for everything else and on ANY problem."""
+        if not self.market_prior or isinstance(question, (MultipleChoiceQuestion, DateQuestion)):
+            return None
+        title = question.question_text or ""
+        if not MQ.HINT.search(f"{title} {question.resolution_criteria or ''}"):
+            return None
+        try:
+            today = datetime.now(timezone.utc).date()
+            resolve = (question.scheduled_resolution_time or question.close_time or datetime.now(timezone.utc)).date()
+            rule = MQ.rule_spec(title, resolve)
+            if rule:
+                (spec, op, thr), thr2, scale, source, weight = rule, None, 1.0, "rule", self.market_weight_rule
+            elif self.market_llm:
+                is_num = isinstance(question, NumericQuestion)
+                rng = (f"The answer must lie between {question.lower_bound} and {question.upper_bound} "
+                       f"(unit: {question.unit_of_measure or 'not stated'})." if is_num else "")
+                text = await make_llm(self.market_parser).invoke(MQ.LLM_PROMPT.format(
+                    today=today.isoformat(), title=title, criteria=question.resolution_criteria or "",
+                    fine_print=question.fine_print or "", qtype="number" if is_num else "yes/no", range_text=rng))
+                parsed = MQ.spec_from_json(MQ.parse_llm_json(text))
+                if not parsed:
+                    return None
+                (spec, op, thr, thr2, scale), source, weight = parsed, "llm", self.market_weight_llm
+            else:
+                return None
+            if isinstance(question, BinaryQuestion) and (op is None or thr is None):
+                return None                                       # a yes/no question needs its threshold
+            if (spec.end - today).days > 370 or (today - spec.end).days > 10:
+                return None
+            sa = await asyncio.to_thread(MP.fetch, spec.a)
+            sb = await asyncio.to_thread(MP.fetch, spec.b) if spec.b else None
+            sims = await asyncio.to_thread(MP.simulate, spec, sa, sb, today)
+            prior = MQ.MarketPrior(spec, sims, source, weight, op, thr, thr2, scale)
+            if isinstance(question, NumericQuestion) and not MQ.plausible(prior.values, question.lower_bound, question.upper_bound):
+                logger.warning(f"market prior rejected (values far outside the question's range) for {question.page_url}")
+                return None
+            self._market[self._key(question)] = prior
+            logger.info(f"market prior ({source}, weight {weight}) for {question.page_url}: {spec}")
+            return prior
+        except Exception as e:                                   # noqa: BLE001 — the prior is optional
+            logger.warning(f"market prior unavailable for {question.page_url}: {e!r}")
+            return None
 
     @staticmethod
     def _question_block(question: MetaculusQuestion) -> str:
@@ -418,13 +479,74 @@ class CommitteeBot(FallTemplateBot2026):
         return await self._date_prompt_to_forecast(question, prompt)
 
     # ------------------------------------------------------------------ aggregation
+    def _weights_for(self, key: object, predictions: list) -> tuple[list[float], list[str]]:
+        """Weight and model of each prediction, matched to the recorded runs (equal weights if that fails)."""
+        runs = list(self._run_results.get(key, []))
+        weights, models = [], []
+        for p in predictions:
+            hit = next((r for r in runs if r[1] is p or (isinstance(p, float) and isinstance(r[1], float) and r[1] == p)), None)
+            if hit is None:
+                logger.warning("weights unavailable for a question; using equal weights")
+                return [1.0] * len(predictions), ["?"] * len(predictions)
+            runs.remove(hit); weights.append(hit[0]); models.append(hit[2])
+        return weights, models
+
+    def _aggregate_binary(self, predictions: list[float], question: BinaryQuestion) -> float:
+        key = self._key(question)
+        weights, models = self._weights_for(key, predictions)
+        raw = combine_binary(predictions, weights, self.aggregator)
+        p = calibrate_binary(raw, self.binary_shift, self.binary_slope)
+        prior = self._market.get(key)
+        pm = prior.p_yes() if prior else None
+        if pm is not None:
+            p = blend_logodds(p, min(max(pm, 0.01), 0.99), prior.weight)
+        final = min(max(p, self.clip[0]), self.clip[1])
+        self.run_log.append(dict(
+            id=question.id_of_question, url=question.page_url, type="binary", title=question.question_text,
+            members=[dict(model=m, weight=w, p=float(v)) for m, w, v in zip(models, weights, predictions)],
+            raw=raw, shift=self.binary_shift, market_p=pm, market_source=prior.source if prior else None,
+            market_weight=prior.weight if pm is not None else None, final=final))
+        return final
+
+    def _aggregate_numeric(self, predictions: list[NumericDistribution], question) -> NumericDistribution:
+        key = self._key(question)
+        weights, models = self._weights_for(key, predictions)
+        cdfs = [p.get_cdf() for p in predictions]
+        xs = [pt.value for pt in cdfs[0]]
+        if any(len(c) != len(xs) or any(a.value != b for a, b in zip(c, xs)) for c in cdfs):
+            raise ValueError("the runs' CDFs are not on the same grid")
+        prior = self._market.get(key) if isinstance(question, NumericQuestion) else None
+        prior_cdf = MP.cdf_on_grid(prior.values, xs) if prior else None
+        final = aggregate_cdf([[pt.percentile for pt in c] for c in cdfs], weights, question.open_lower_bound,
+                              question.open_upper_bound, self.numeric_flat_weight, self.numeric_tail, prior_cdf,
+                              prior.weight if prior else 0.0)
+        dist = NumericDistribution.from_question(
+            [Percentile(value=v, percentile=float(q)) for v, q in zip(xs, final)], question)
+        out = dist.get_cdf()                                       # validates exactly as publishing will
+        at = lambda c, q: float(np.interp(q, [pt.percentile for pt in c], [pt.value for pt in c]))
+        self.run_log.append(dict(
+            id=question.id_of_question, url=question.page_url, type=question.__class__.__name__,
+            title=question.question_text,
+            members=[dict(model=m, weight=w, p05=at(c, .05), p50=at(c, .5), p95=at(c, .95))
+                     for m, w, c in zip(models, weights, cdfs)],
+            flat_weight=self.numeric_flat_weight, market_source=prior.source if prior else None,
+            market_weight=prior.weight if prior else None,
+            market_p50=float(np.median(prior.values)) if prior else None,
+            final=dict(p05=at(out, .05), p50=at(out, .5), p95=at(out, .95))))
+        return dist
+
     async def _aggregate_predictions(self, predictions, question):
-        if isinstance(question, BinaryQuestion) and predictions and all(isinstance(p, float) for p in predictions):
-            runs = self._run_results.get(self._key(question), [])
-            if len(runs) == len(predictions) and sorted(v for _, v in runs) == sorted(predictions):
-                values, weights = [v for _, v in runs], [w for w, _ in runs]
-            else:                                                  # bookkeeping mismatch: fall back to equal weights
-                logger.warning(f"weights unavailable for {question.page_url}; using equal weights")
-                values, weights = list(predictions), [1.0] * len(predictions)
-            return aggregate_binary(values, weights, method=self.aggregator, extremize=self.extremize, clip=self.clip)
+        try:
+            if isinstance(question, BinaryQuestion) and predictions and all(isinstance(p, float) for p in predictions):
+                return self._aggregate_binary(list(predictions), question)
+            if (isinstance(question, (NumericQuestion, DateQuestion)) and predictions
+                    and all(isinstance(p, NumericDistribution) for p in predictions)):
+                return self._aggregate_numeric(list(predictions), question)
+        except Exception as e:                                   # noqa: BLE001 — never lose a forecast to post-processing
+            logger.warning(f"custom aggregation failed for {question.page_url} ({e!r}); using the template's")
         return await super()._aggregate_predictions(predictions, question)
+
+    def binary_summary(self) -> tuple[int, float | None]:
+        """(number of yes/no forecasts made, their mean) — compare the mean with config.TARGET_YES_RATE."""
+        ps = [r["final"] for r in self.run_log if r["type"] == "binary"]
+        return len(ps), (sum(ps) / len(ps) if ps else None)

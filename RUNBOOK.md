@@ -34,9 +34,11 @@ done yet.
   - optional AskNews access (Metaculus participant access; next application window 2027-01-01): `ASKNEWS_API_KEY`,
     or the older `ASKNEWS_CLIENT_ID` + `ASKNEWS_SECRET` pair. AskNews's free plan (25 credits/month ≈ 4 questions)
     is too small to be worth adding.
-- **Variables (optional spending controls):**
-  - `BOT_TIER_MAIN` and `BOT_TIER_MINIBENCH` (`premium` / `standard` / `balanced` / `minimal`; default `balanced`);
-  - `BOT_SOFT_FLOOR_USD` (default 15) and `BOT_HARD_FLOOR_USD` (default 3).
+- **Variables (all optional; the defaults are the tested settings):**
+  - spending: `BOT_TIER_MAIN` and `BOT_TIER_MINIBENCH` (`premium` / `standard` / `balanced` / `minimal`; default
+    `balanced`); `BOT_SOFT_FLOOR_USD` (default 15) and `BOT_HARD_FLOOR_USD` (default 3);
+  - calibration: `BOT_BINARY_SHIFT` (default −0.30), `BOT_NUMERIC_FLAT_WEIGHT` (default 0.15),
+    `BOT_MARKET_PRIOR` (`true` / `false`, default `true`). Change these only on Claude's advice.
 
 Then open the **Actions** tab and enable workflows.
 
@@ -56,6 +58,13 @@ Then open the **Actions** tab and enable workflows.
 - **Keep-alive.** GitHub switches off scheduled workflows in public repositories after 60 days without commits. The
   `Keep scheduled workflows alive` workflow makes an empty commit on the 1st of each month to prevent that.
 
+- **Calibration check in every run log.** Each run prints a line such as
+  `32 yes/no forecast(s), mean 35.2% (tournament base rate ~32%; shift -0.30)`. Over a few weeks the mean should sit
+  near 32%. Claude reads these and proposes a new shift if it drifts.
+- **Forecast log.** Every run uploads `forecast-log-<run id>` (Actions → the run → Artifacts, kept 90 days): one line
+  per question with each model's own forecast. `Desktop\LLM_Ventures\opsebop_collect_logs.py` on the server
+  copies them locally so they outlive the 90 days.
+
 ## Pausing / stopping
 `Actions → Forecast on new AI tournament questions → … → Disable workflow`. Re-enable the same way.
 
@@ -70,15 +79,17 @@ Then open the **Actions** tab and enable workflows.
 
 | Tier | Cost |
 |---|---|
-| premium | ~$1.00 |
-| standard | ~$0.55 |
-| balanced (default) | ~$0.35 |
+| premium | ~$1.10 |
+| standard | ~$0.60 |
+| balanced (default) | ~$0.40 |
 | minimal | ~$0.12 |
 
+(OpenRouter prices checked 2026-11-12; the market baseline adds no model cost for recognised question families.)
+
 A season has ~500 main-tournament questions plus ~500 MiniBench ones.
-- **~$100 of credit covers ~280 questions on `balanced`**, about half a season; below the soft floor the bot
+- **~$100 of credit covers ~250 questions on `balanced`**, about half a season; below the soft floor the bot
   continues on `minimal`. Metaculus raises credits only after above-average MiniBench results.
-- A full season on `balanced` costs ~$350; on `standard` ~$550. Anything beyond the sponsored credit needs your own
+- A full season on `balanced` costs ~$400; on `standard` ~$600. Anything beyond the sponsored credit needs your own
   OpenRouter credit — your decision.
 - **Prizes:** paid by Metaculus to the bot's owner after each season. Declare them as income where you are taxed, and
   check that competition prizes are compatible with any employment or fellowship contract.
@@ -89,5 +100,6 @@ Monthly:
 - the bot's comments on resolved questions;
 - the credit left.
 
-The agent (Claude Code) reviews each season's resolved questions and proposes changes (e.g. switching extremisation on
-if the committee proves under-confident). Changes go in between seasons or on MiniBench first.
+The agent (Claude Code) reviews each season's results and proposes changes. Metaculus hides resolutions from bot
+tokens, so the forecast log is compared with resolutions read from the public tournament pages or Metaculus's data
+releases. Changes go in between seasons or on MiniBench first.
