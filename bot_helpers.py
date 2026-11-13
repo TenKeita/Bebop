@@ -148,3 +148,23 @@ def print_run_summary_banner(
 
     print(banner)
     print()
+
+
+def clamp_percentiles(percentiles, question, buffer_frac: float = 1.9):
+    """Keep each declared percentile inside forecasting_tools' tolerance (the question's bounds +/- 2x its range) so a
+    model that puts a tail far outside the range is clipped instead of discarded. 2026-11-13, first real test: on a date
+    question 2 of 5 models gave 90th/95th percentiles ten years past the upper bound and were dropped. Values are kept
+    strictly increasing. Works for numeric (floats) and date questions (datetime bounds -> timestamps)."""
+    lb, ub = question.lower_bound, question.upper_bound
+    lb = lb.timestamp() if hasattr(lb, "timestamp") else float(lb)
+    ub = ub.timestamp() if hasattr(ub, "timestamp") else float(ub)
+    rng = max(ub - lb, 1e-9)
+    lo, hi = lb - buffer_frac * rng, ub + buffer_frac * rng
+    out, prev = [], None
+    for p in sorted(percentiles, key=lambda q: q.percentile):
+        v = min(max(float(p.value), lo), hi)
+        if prev is not None and v <= prev:
+            v = prev + rng * 1e-4
+        out.append(type(p)(percentile=p.percentile, value=v))
+        prev = v
+    return out

@@ -24,24 +24,29 @@ class CreditGuard:
         self.timeout = timeout
 
     def remaining_usd(self) -> float | None:
-        """Remaining credit in USD, or None if it cannot be determined."""
+        """Remaining credit in USD: the LOWER of the key's own limit and the account's balance, or None if neither can
+        be read. (2026-11-13: a key capped at $100 on an account holding ~$10 reported $100 — the cap is not money.)"""
         if not self.api_key:
             return None
         headers = {"Authorization": f"Bearer {self.api_key}"}
+        vals: list[float] = []
         try:
             r = requests.get(KEY_URL, headers=headers, timeout=self.timeout)
             r.raise_for_status()
             data = (r.json() or {}).get("data") or {}
             if data.get("limit_remaining") is not None:
-                return float(data["limit_remaining"])
+                vals.append(float(data["limit_remaining"]))
+        except Exception as e:                                   # noqa: BLE001 — a guard must never crash the bot
+            logger.warning(f"key limit check failed: {e!r}")
+        try:
             r = requests.get(CREDITS_URL, headers=headers, timeout=self.timeout)
             r.raise_for_status()
             c = (r.json() or {}).get("data") or {}
             if c.get("total_credits") is not None and c.get("total_usage") is not None:
-                return float(c["total_credits"]) - float(c["total_usage"])
-        except Exception as e:                                   # noqa: BLE001 — a guard must never crash the bot
-            logger.warning(f"credit check failed: {e!r}")
-        return None
+                vals.append(float(c["total_credits"]) - float(c["total_usage"]))
+        except Exception as e:                                   # noqa: BLE001
+            logger.warning(f"account balance check failed: {e!r}")
+        return min(vals) if vals else None
 
     def decide(self, requested_tier: str, cheapest_tier: str) -> tuple[str | None, str]:
         """(tier to use or None = do not forecast, human-readable reason)."""

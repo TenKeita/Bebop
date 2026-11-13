@@ -357,3 +357,34 @@ def test_forecast_log_and_summary(offline, tmp_path):
     assert all(x["tier"] == "balanced" and x["published"] is False and x["shift"] == -0.3 and len(x["members"]) == 5 for x in lines)
     assert forecast_log.write([], str(tmp_path / "log"), "x", "y", True) is None
     assert forecast_log.write(bot.run_log, str(tmp_path / "log" / "a\x00b"), "x", "y", True) is None      # never raises
+
+
+def test_credit_guard_uses_the_lower_of_cap_and_balance(monkeypatch):
+    import budget
+
+    class R:
+        def __init__(self, d): self.d = d
+        def raise_for_status(self): pass
+        def json(self): return self.d
+
+    def fake_get(url, **k):
+        return R({"data": {"limit_remaining": 100.0}}) if url == budget.KEY_URL else R({"data": {"total_credits": 10.0, "total_usage": 3.2}})
+    monkeypatch.setattr(budget.requests, "get", fake_get)
+    g = budget.CreditGuard("key", soft_floor_usd=15, hard_floor_usd=3)
+    assert abs(g.remaining_usd() - 6.8) < 1e-9
+    tier, why = g.decide("balanced", "minimal")
+    assert tier == "minimal" and "6.80" in why
+
+
+def test_clamp_percentiles_keeps_far_tails_inside_tolerance():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    from forecasting_tools import Percentile
+    from bot_helpers import clamp_percentiles
+    q = SimpleNamespace(lower_bound=datetime(2022, 5, 29, tzinfo=timezone.utc), upper_bound=datetime(2027, 5, 28, tzinfo=timezone.utc))
+    lb, ub = q.lower_bound.timestamp(), q.upper_bound.timestamp(); rng = ub - lb
+    vals = [ub - 0.3 * rng, ub - 0.1 * rng, ub + 3 * rng, ub + 4 * rng]          # two tails far beyond the tolerance
+    out = clamp_percentiles([Percentile(percentile=p, value=v) for p, v in zip((0.1, 0.5, 0.9, 0.95), vals)], q)
+    assert all(lb - 2 * rng <= x.value <= ub + 2 * rng for x in out)
+    assert all(b.value > a.value for a, b in zip(out, out[1:]))
+    assert out[0].value == vals[0] and out[1].value == vals[1]                     # values inside are untouched

@@ -19,6 +19,7 @@ from bot_helpers import (
 
 silence_noisy_dependencies()
 
+from bot_helpers import clamp_percentiles
 from forecasting_tools import (
     AskNewsSearcher,
     BinaryQuestion,
@@ -427,7 +428,7 @@ class FallTemplateBot2026(ForecastBot):
             additional_instructions=parsing_instructions,
             num_validation_samples=self._structure_output_validation_samples,
         )
-        prediction = NumericDistribution.from_question(percentile_list, question)
+        prediction = NumericDistribution.from_question(clamp_percentiles(percentile_list, question), question)
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}."
         )
@@ -527,7 +528,7 @@ class FallTemplateBot2026(ForecastBot):
             )
             for percentile in date_percentile_list
         ]
-        prediction = NumericDistribution.from_question(percentile_list, question)
+        prediction = NumericDistribution.from_question(clamp_percentiles(percentile_list, question), question)
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {prediction.declared_percentiles}."
         )
